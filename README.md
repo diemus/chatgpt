@@ -8,8 +8,8 @@ Command line version of ChatGPT
 > use `gpt-3.5-turbo` model
 
 env:
-1. CHATGPT_API_KEY(required,your openai KEY)
-2. CHATGPT_API_PROXY(optional,your http proxy for request)
+1. `CHATGPT_API_KEY`(required,your openai KEY)
+2. `CHATGPT_API_PROXY`(optional,your http proxy for request)
 
 commands:
 + exit: exit chatGPT
