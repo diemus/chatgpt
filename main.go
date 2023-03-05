@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"github.com/c-bata/go-prompt"
-	"github.com/go-resty/resty/v2"
-	"github.com/tidwall/gjson"
+	"github.com/sashabaranov/go-openai"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
 
-var msg []map[string]string
+var conversation []openai.ChatCompletionMessage
 var debug bool
 
 func completer(d prompt.Document) []prompt.Suggest {
@@ -35,12 +39,12 @@ func executor(input string) {
 	case "exit", "e":
 		os.Exit(0)
 	case "context":
-		for i, data := range msg {
-			fmt.Printf("#%d %s: %s\n", i, data["role"], data["content"])
+		for i, data := range conversation {
+			fmt.Printf("#%d %s: %s\n", i, data.Role, data.Content)
 		}
 		return
 	case "reset":
-		msg = []map[string]string{}
+		conversation = []openai.ChatCompletionMessage{}
 		return
 	case "debug":
 		debug = !debug
@@ -48,48 +52,79 @@ func executor(input string) {
 		return
 	}
 
-	answer, err := processQuestion(input)
+	err := processQuestion(input)
 	if err != nil {
+		fmt.Printf("[ERROR]%s\n", err)
 		os.Exit(1)
 	}
-	fmt.Println(strings.TrimSpace(answer["content"]))
 }
 
-func processQuestion(question string) (map[string]string, error) {
-	restyClient := resty.New()
-
-	key := os.Getenv("CHATGPT_API_KEY")
+func processQuestion(question string) error {
+	token := os.Getenv("CHATGPT_API_KEY")
 	proxy := os.Getenv("CHATGPT_API_PROXY")
+	config := openai.DefaultConfig(token)
 
 	if proxy != "" {
-		restyClient.SetProxy(proxy)
+		proxyUrl, err := url.Parse(proxy)
+		if err != nil {
+			fmt.Printf("[ERROR]%s\n", err)
+			os.Exit(1)
+		}
+		transport := &http.Transport{
+			Proxy: http.ProxyURL(proxyUrl),
+		}
+		config.HTTPClient = &http.Client{
+			Transport: transport,
+		}
 	}
 
-	msg = append(msg, map[string]string{"role": "user", "content": question})
-	resp, err := restyClient.R().
-		SetHeader("Content-Type", "application/json").
-		SetHeader("Authorization", fmt.Sprintf("Bearer %s", key)).
-		SetBody(map[string]interface{}{
-			"model":    "gpt-3.5-turbo",
-			"messages": msg,
-		}).
-		Post("https://api.openai.com/v1/chat/completions")
+	conversation = append(conversation, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: question,
+	})
+
+	client := openai.NewClientWithConfig(config)
+	stream, err := client.CreateChatCompletionStream(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model:    openai.GPT3Dot5Turbo,
+			Messages: conversation,
+			Stream:   true,
+		},
+	)
+	defer stream.Close()
+
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if debug {
-		fmt.Println(resp.String())
-		fmt.Println("-------------------------")
+	answer := strings.Builder{}
+	for {
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			// 结束时换行
+			fmt.Printf("\n")
+			break
+		}
+
+		if err != nil {
+			fmt.Printf("[ERROR]%s\n", err)
+			return err
+		}
+
+		for _, choice := range response.Choices {
+			answer.WriteString(choice.Delta.Content)
+			fmt.Printf("%v", choice.Delta.Content)
+		}
 	}
 
-	result := gjson.Get(resp.String(), "choices.0.message.content")
+	//将回复整体添加到下次请求的上下文中
+	conversation = append(conversation, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleAssistant,
+		Content: answer.String(),
+	})
 
-	reply := map[string]string{"role": "assistant", "content": result.String()}
-
-	msg = append(msg, reply)
-
-	return reply, nil
+	return nil
 }
 
 func main() {
